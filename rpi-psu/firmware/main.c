@@ -29,12 +29,12 @@
 
 enum {
 	STATE_RPI_OFF = 0,
-	STATE_RPI_OFF_FROM_LINUX,
 	STATE_RPI_RUNNING,
 	STATE_POWER_OFF_REQUESTED,
-	STATE_POWER_OFF_REQUESTED_FROM_LINUX,
 	STATE_POWER_ON_REQUESTED,
 };
+
+volatile uint8_t state = STATE_RPI_OFF;
 
 static void pa_mute(void)
 {
@@ -54,38 +54,6 @@ static void psu_on(void)
 static void psu_off(void)
 {
 	PORTB &= ~(_BV(RELAY));
-}
-
-static uint8_t is_power_on_req(void)
-{
-	uint8_t counter = 0;
-
-	while (!(PINB & _BV(POWER_SWITCH)) && counter < 10) {
-		_delay_ms(20);
-		counter++;
-	}
-
-	if (counter == 10) {
-		return TRUE;
-	} else {
-		return FALSE;
-	}
-}
-
-static uint8_t is_power_off_req(void)
-{
-	uint8_t counter = 0;
-
-	while ((PINB & _BV(POWER_SWITCH)) && counter < 10) {
-		_delay_ms(20);
-		counter++;
-	}
-
-	if (counter == 10) {
-		return TRUE;
-	} else {
-		return FALSE;
-	}
 }
 
 static uint8_t is_rpi_running(void)
@@ -131,83 +99,33 @@ static void do_power_off(void)
 	PORTB &= ~(_BV(RPI_POWER_OFF_REQ));
 }
 
-static uint8_t state_rpi_off(uint8_t state)
+static void state_rpi_off(void)
 {
-	uint8_t next_state = state;
+	// Nothing to do here
+}
 
+static void state_rpi_running(void)
+{
 	if (!is_rpi_running()) {
-		if (is_power_on_req()) {
-			// RPi request to power on via power switch
-			next_state = STATE_POWER_ON_REQUESTED;
-		}
-	}
-
-	return next_state;
-}
-
-static uint8_t state_rpi_off_from_linux(uint8_t state)
-{
-	uint8_t next_state = state;
-
-	if (is_power_off_req()) {
-		// RPi already powered off from linux
-		next_state = STATE_RPI_OFF;
-	}
-
-	return next_state;
-}
-
-static uint8_t state_rpi_running(uint8_t state)
-{
-	uint8_t next_state = state;
-
-	if (is_rpi_running()) {
-		if (is_power_off_req()) {
-			// RPi request to power off via power switch
-			next_state = STATE_POWER_OFF_REQUESTED;
-		}
-	} else {
 		// RPi was halted from Web/Linux
-		next_state = STATE_POWER_OFF_REQUESTED_FROM_LINUX;
+		state = STATE_POWER_OFF_REQUESTED;
 	}
-
-	return next_state;
 }
 
-static uint8_t state_power_off_requested(uint8_t state)
+static void state_power_on_requested(void)
 {
-	uint8_t next_state = state;
-
-	do_power_off();
-
-	// Move to power off state
-	next_state = STATE_RPI_OFF;
-
-	return next_state;
-}
-
-static uint8_t state_power_off_requested_from_linux(uint8_t state)
-{
-	uint8_t next_state = state;
-
-	do_power_off();
-
-	// Move to power off from linux state
-	next_state = STATE_RPI_OFF_FROM_LINUX;
-
-	return next_state;
-}
-
-static uint8_t state_power_on_requested(uint8_t state)
-{
-	uint8_t next_state = state;
-
 	do_power_on();
 
 	// Move to running state
-	next_state = STATE_RPI_RUNNING;
+	state = STATE_RPI_RUNNING;
+}
 
-	return next_state;
+static void state_power_off_requested(void)
+{
+	do_power_off();
+
+	// Move to power off state
+	state = STATE_RPI_OFF;
 }
 
 static void init(void)
@@ -222,13 +140,51 @@ static void init(void)
 	// Enable pull-up on Power switch
 	PORTB |= _BV(POWER_SWITCH);
 
+	// Enable interrupt for Power switch
+	GIFR |= _BV(PCIF);
+	GIMSK |= _BV(PCIE);
+	PCMSK = _BV(POWER_SWITCH);
+
+	state = STATE_RPI_OFF;
+
 	sei();
+}
+
+ISR(PCINT0_vect, ISR_BLOCK)
+{
+	uint8_t counter = 0;
+
+	if (!(PINB & _BV(POWER_SWITCH))) {
+		while (!(PINB & _BV(POWER_SWITCH)) && counter < 10) {
+			_delay_ms(20);
+			counter++;
+		}
+
+		if (counter == 10) {
+			if (state == STATE_RPI_OFF) {
+				// RPi request to power on via power switch
+					state = STATE_POWER_ON_REQUESTED;
+			}
+		}
+	} else {
+		while ((PINB & _BV(POWER_SWITCH)) && counter < 10) {
+			_delay_ms(20);
+			counter++;
+		}
+
+		if (counter == 10) {
+			if (state == STATE_RPI_RUNNING) {
+				// RPi request to power off via power switch
+				state = STATE_POWER_OFF_REQUESTED;
+			}
+		}
+	}
+
+	GIFR |= _BV(PCIF);
 }
 
 int main(void)
 {
-	uint8_t state = STATE_RPI_OFF;
-
 	init();
 
 	// Mute PA
@@ -242,27 +198,19 @@ int main(void)
 	while(1) {
 		switch (state) {
 			case STATE_RPI_OFF:
-				state = state_rpi_off(state);
-				break;
-
-			case STATE_RPI_OFF_FROM_LINUX:
-				state = state_rpi_off_from_linux(state);
+				state_rpi_off();
 				break;
 
 			case STATE_RPI_RUNNING:
-				state = state_rpi_running(state);
-				break;
-
-			case STATE_POWER_OFF_REQUESTED:
-				state = state_power_off_requested(state);
-				break;
-
-			case STATE_POWER_OFF_REQUESTED_FROM_LINUX:
-				state = state_power_off_requested_from_linux(state);
+				state_rpi_running();
 				break;
 
 			case STATE_POWER_ON_REQUESTED:
-				state = state_power_on_requested(state);
+				state_power_on_requested();
+				break;
+
+			case STATE_POWER_OFF_REQUESTED:
+				state_power_off_requested();
 				break;
 		}
 	}

@@ -12,7 +12,7 @@ MCU = attiny45
 F_CPU = 1000000
 
 # Target file name (without extension).
-TARGET = rpi-psu-1.1
+TARGET = rpi-psu-1.2
 
 # Programming hardware: type avrdude -c ?
 # to get a full listing.
